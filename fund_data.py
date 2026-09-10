@@ -124,6 +124,23 @@ def split_ratio(value) -> float:
     return float(match.group(1))
 
 
+def finite_numbers(frame: pd.DataFrame, columns: set[str], name: str, positive: bool = False) -> pd.DataFrame:
+    result = frame.copy()
+    for column in columns:
+        values = pd.to_numeric(result[column], errors="raise")
+        if values.isna().any() or not values.map(isfinite).all() or (positive and (values <= 0).any()) or (not positive and (values < 0).any()):
+            raise ValueError(f"{name} {column} 必须为{'正' if positive else '非负'}有限数值")
+        result[column] = values
+    return result
+
+
+def fee_number(value) -> float:
+    match = re.fullmatch(r"\s*([+]?(?:\d+(?:\.\d*)?|\.\d+))(?:[%％]|元(?:/(?:笔|年))?)?\s*", str(value))
+    if match is None or not isfinite(float(match.group(1))):
+        raise ValueError(f"无法解析费用: {value}")
+    return float(match.group(1))
+
+
 def fetch_catalog(api=akshare) -> pd.DataFrame:
     frame = need(api.fund_name_em(), {"基金代码", "基金简称", "基金类型"}, "基金目录")
     return frame.rename(columns={"基金代码": "fund_code", "基金简称": "fund_name", "基金类型": "fund_type"})[["fund_code", "fund_name", "fund_type"]]
@@ -138,6 +155,7 @@ def _core(code: str, api) -> Bundle:
     overview = need(api.fund_overview_em(symbol=code), {"基金简称", "基金代码"}, "基金概况").iloc[0]
     size, size_date = amount_and_date(overview.get("资产规模"))
     official = _official(code)
+    has_official = bool(official)
     manager_start_dates = official.pop("manager_start_dates", {})
     live_manager = overview.get("基金经理人")
     metadata = {
@@ -156,7 +174,7 @@ def _core(code: str, api) -> Bundle:
         **official,
     }
     unit = need(api.fund_open_fund_info_em(symbol=code, indicator="单位净值走势"), {"净值日期", "单位净值"}, "单位净值")
-    cumulative = need(api.fund_open_fund_info_em(symbol=code, indicator="累计净值走势"), {"净值日期", "累计净值"}, "累计净值")
+    cumulative = finite_numbers(need(api.fund_open_fund_info_em(symbol=code, indicator="累计净值走势"), {"净值日期", "累计净值"}, "累计净值"), {"累计净值"}, "累计净值", positive=True)
     raw_dividends = need(api.fund_open_fund_info_em(symbol=code, indicator="分红送配详情"), {"除息日", "每份分红"}, "分红", allow_empty=True)
     raw_splits = need(api.fund_open_fund_info_em(symbol=code, indicator="拆分详情"), {"拆分折算日", "拆分折算比例"}, "拆分", allow_empty=True)
     dividends = pd.DataFrame(columns=["ex_date", "dividend_per_unit"])
@@ -170,10 +188,11 @@ def _core(code: str, api) -> Bundle:
     if nav["unit_nav"].isna().any() or not nav["unit_nav"].map(isfinite).all() or (nav["unit_nav"] <= 0).any():
         raise ValueError("单位净值必须为正数且为有限数值")
     nav = nav.merge(cumulative.rename(columns={"净值日期": "nav_date", "累计净值": "cumulative_nav"}), on="nav_date", how="left")
+    finite_numbers(nav, {"cumulative_nav"}, "累计净值", positive=True)
     nav = adjust_nav(nav, dividends, splits)
     as_of = nav["nav_date"].max()
     return {
-        "metadata": (pd.DataFrame([metadata]), size_date or as_of, "AKShare/东方财富；博时基金官方资料"),
+        "metadata": (pd.DataFrame([metadata]), size_date or as_of, "AKShare/东方财富" + ("；博时基金官方资料" if has_official else "")),
         "nav": (nav, as_of, "AKShare/东方财富"),
     }
 
@@ -189,13 +208,13 @@ def fetch_fund(code: str, api=akshare) -> tuple[Bundle, list[str]]:
             warnings.append(f"{name}: {error}")
 
     def market():
-        frame = need(api.stock_zh_index_daily_em(symbol="sh000300", start_date="19900101", end_date="20500101"), {"date", "close"}, "沪深300")
+        frame = finite_numbers(need(api.stock_zh_index_daily_em(symbol="sh000300", start_date="19900101", end_date="20500101"), {"date", "close"}, "沪深300"), {"close"}, "沪深300", positive=True)
         frame = frame.rename(columns={"date": "trade_date"})[["trade_date", "close"]]
         frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime("%Y-%m-%d")
         return frame, frame["trade_date"].max(), "AKShare/东方财富"
 
     def holdings():
-        frame = need(api.fund_portfolio_hold_em(symbol=code, date=""), {"序号", "股票代码", "股票名称", "占净值比例", "持仓市值", "季度"}, "基金持仓")
+        frame = finite_numbers(need(api.fund_portfolio_hold_em(symbol=code, date=""), {"序号", "股票代码", "股票名称", "占净值比例", "持仓市值", "季度"}, "基金持仓"), {"占净值比例", "持仓市值"}, "基金持仓")
         result = pd.DataFrame({"rank": frame["序号"], "security_code": frame["股票代码"].astype(str).str.zfill(6), "security_name": frame["股票名称"], "weight": pd.to_numeric(frame["占净值比例"]) / 100, "market_value_cny": pd.to_numeric(frame["持仓市值"]) * 10_000, "report_date": frame["季度"].map(quarter_end)})
         latest = result["report_date"].max()
         return result[result["report_date"] == latest], latest, "AKShare/东方财富"
@@ -205,13 +224,13 @@ def fetch_fund(code: str, api=akshare) -> tuple[Bundle, list[str]]:
     report_date = bundle.get("holdings", (pd.DataFrame(), "", ""))[1]
     if report_date:
         def industry():
-            frame = need(api.fund_portfolio_industry_allocation_em(symbol=code, date=report_date[:4]), {"行业类别", "占净值比例", "截止时间"}, "行业配置")
+            frame = finite_numbers(need(api.fund_portfolio_industry_allocation_em(symbol=code, date=report_date[:4]), {"行业类别", "占净值比例", "截止时间"}, "行业配置"), {"占净值比例"}, "行业配置")
             result = pd.DataFrame({"category": frame["行业类别"], "weight": pd.to_numeric(frame["占净值比例"]) / 100, "report_date": pd.to_datetime(frame["截止时间"]).dt.strftime("%Y-%m-%d")})
             latest = result["report_date"].max()
             return result[result["report_date"] == latest], latest, "AKShare/东方财富"
 
         def assets():
-            frame = need(api.fund_individual_detail_hold_xq(symbol=code, date=report_date.replace("-", "")), {"资产类型", "仓位占比"}, "资产配置")
+            frame = finite_numbers(need(api.fund_individual_detail_hold_xq(symbol=code, date=report_date.replace("-", "")), {"资产类型", "仓位占比"}, "资产配置"), {"仓位占比"}, "资产配置")
             result = pd.DataFrame({"category": frame["资产类型"], "weight": pd.to_numeric(frame["仓位占比"]) / 100})
             result["report_date"] = report_date
             return result, report_date, "AKShare/雪球基金"
@@ -221,6 +240,7 @@ def fetch_fund(code: str, api=akshare) -> tuple[Bundle, list[str]]:
 
     def fees():
         frame = need(api.fund_individual_detail_info_xq(symbol=code), {"费用类型", "条件或名称", "费用"}, "基金费率")
+        frame["费用"].map(fee_number)
         result = frame.rename(columns={"费用类型": "fee_type", "条件或名称": "condition", "费用": "fee"})[["fee_type", "condition", "fee"]]
         return result, bundle["metadata"][1], "AKShare/雪球基金"
 
@@ -243,8 +263,7 @@ def refresh_fund(path: Path, code: str, fetcher=fetch_fund) -> dict:
             if dataset in bundle:
                 fresh, as_of, source = bundle[dataset]
                 old = load_frame(path, code, dataset)
-                if not old.empty:
-                    fresh = pd.concat([old, fresh], ignore_index=True).drop_duplicates(date_column, keep="last").sort_values(date_column)
+                fresh = pd.concat(([old] if not old.empty else []) + [fresh], ignore_index=True).drop_duplicates(date_column, keep="last").sort_values(date_column)
                 bundle[dataset] = (fresh.reset_index(drop=True), as_of, source)
         save_bundle(path, code, bundle)
         status = "partial" if warnings else "success"

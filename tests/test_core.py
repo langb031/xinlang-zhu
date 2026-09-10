@@ -8,6 +8,31 @@ from fund_data import fetch_catalog, fetch_fund, init_db, load_frame, refresh_fu
 from metrics import adjust_nav, analyze
 
 
+class CoreApi:
+    def __init__(self, cumulative_nav=1.0, index_close=None, fee="0.15%"):
+        self.cumulative_nav = cumulative_nav
+        self.index_close = index_close
+        self.fee = fee
+
+    def fund_overview_em(self, symbol):
+        return pd.DataFrame({"基金简称": ["测试基金"], "基金代码": [symbol]})
+
+    def fund_open_fund_info_em(self, symbol, indicator):
+        if indicator == "单位净值走势":
+            return pd.DataFrame({"净值日期": ["2026-09-09"], "单位净值": [1.0]})
+        if indicator == "累计净值走势":
+            return pd.DataFrame({"净值日期": ["2026-09-09"], "累计净值": [self.cumulative_nav]})
+        if indicator == "分红送配详情":
+            return pd.DataFrame(columns=["除息日", "每份分红"])
+        return pd.DataFrame(columns=["拆分折算日", "拆分折算比例"])
+
+    def stock_zh_index_daily_em(self, symbol, start_date, end_date):
+        return pd.DataFrame({"date": ["2026-09-09"], "close": [self.index_close]})
+
+    def fund_individual_detail_info_xq(self, symbol):
+        return pd.DataFrame({"费用类型": ["管理费"], "条件或名称": ["每年"], "费用": [self.fee]})
+
+
 class CacheTests(unittest.TestCase):
     def test_dataframe_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -86,6 +111,58 @@ class RefreshTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "单位净值"):
             fetch_fund("050009", Api())
+
+    def test_non_finite_cumulative_nav_preserves_old_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "fund.sqlite3"
+            init_db(database)
+            old = pd.DataFrame({"nav_date": ["2026-09-08"], "unit_nav": [1.9]})
+            save_bundle(database, "050009", {"nav": (old, "2026-09-08", "fixture")})
+
+            result = refresh_fund(database, "050009", fetcher=lambda code: fetch_fund(code, CoreApi(float("inf"))))
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(load_frame(database, "050009", "nav").to_dict("records"), old.to_dict("records"))
+
+    def test_non_finite_optional_index_is_warning_and_preserves_old_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "fund.sqlite3"
+            init_db(database)
+            old = pd.DataFrame({"trade_date": ["2026-09-08"], "close": [3500.0]})
+            save_bundle(database, "050009", {"index": (old, "2026-09-08", "fixture")})
+
+            result = refresh_fund(database, "050009", fetcher=lambda code: fetch_fund(code, CoreApi(index_close=float("inf"))))
+
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(load_frame(database, "050009", "index").to_dict("records"), old.to_dict("records"))
+
+    def test_first_refresh_deduplicates_nav_and_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "fund.sqlite3"
+            init_db(database)
+
+            def fetcher(code):
+                nav = pd.DataFrame({"nav_date": ["2026-09-09", "2026-09-09"], "unit_nav": [1.0, 1.1]})
+                index = pd.DataFrame({"trade_date": ["2026-09-09", "2026-09-09"], "close": [3500.0, 3510.0]})
+                return {"nav": (nav, "2026-09-09", "fixture"), "index": (index, "2026-09-09", "fixture")}, []
+
+            result = refresh_fund(database, "050009", fetcher=fetcher)
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(load_frame(database, "050009", "nav").to_dict("records"), [{"nav_date": "2026-09-09", "unit_nav": 1.1}])
+            self.assertEqual(load_frame(database, "050009", "index").to_dict("records"), [{"trade_date": "2026-09-09", "close": 3510.0}])
+
+    def test_generic_fund_metadata_uses_only_live_source(self):
+        bundle, warnings = fetch_fund("999999", CoreApi())
+
+        self.assertTrue(warnings)
+        self.assertEqual(bundle["metadata"][2], "AKShare/东方财富")
+
+    def test_malformed_optional_fee_is_warning(self):
+        bundle, warnings = fetch_fund("050009", CoreApi(fee="1not-a-fee"))
+
+        self.assertNotIn("fees", bundle)
+        self.assertTrue(any(warning.startswith("fees:") for warning in warnings))
 
 
 class MetricTests(unittest.TestCase):
