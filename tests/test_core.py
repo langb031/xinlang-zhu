@@ -31,6 +31,22 @@ class CacheTests(unittest.TestCase):
 
 
 class MetricTests(unittest.TestCase):
+    def test_invalid_corporate_actions_are_rejected(self):
+        nav = pd.DataFrame({"nav_date": ["2026-01-01"], "unit_nav": [1.0]})
+        with self.assertRaises(ValueError):
+            adjust_nav(nav, pd.DataFrame({"ex_date": ["2026-01-01"], "dividend_per_unit": [None]}))
+        with self.assertRaises(ValueError):
+            adjust_nav(nav, pd.DataFrame(), pd.DataFrame({"split_date": ["2026-01-01"], "split_ratio": [0]}))
+
+    def test_invalid_adjusted_nav_is_rejected(self):
+        nav = pd.DataFrame({"nav_date": ["2026-01-01", "2026-01-02"], "adjusted_nav": [1.0, None]})
+        with self.assertRaises(ValueError):
+            analyze(nav)
+
+    def test_manager_return_requires_start_nav(self):
+        nav = pd.DataFrame({"nav_date": ["2026-01-10", "2026-01-11"], "adjusted_nav": [1.0, 1.1]})
+        self.assertIsNone(analyze(nav, manager_start_date="2026-01-01")["manager_return"])
+
     def test_cash_dividend_is_reinvested(self):
         nav = pd.DataFrame({"nav_date": ["2026-01-01", "2026-01-02"], "unit_nav": [1.0, 0.9]})
         dividends = pd.DataFrame({"ex_date": ["2026-01-02"], "dividend_per_unit": [0.1]})

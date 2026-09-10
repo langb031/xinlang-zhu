@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import sqrt
+from math import isfinite, sqrt
 import pandas as pd
 
 
@@ -21,10 +21,18 @@ def adjust_nav(nav: pd.DataFrame, dividends: pd.DataFrame, splits: pd.DataFrame 
     dividend_map = {}
     if not dividends.empty:
         prepared = dividends.assign(ex_date=pd.to_datetime(dividends["ex_date"]))
+        values = pd.to_numeric(prepared["dividend_per_unit"], errors="raise")
+        if values.isna().any() or not values.map(isfinite).all():
+            raise ValueError("分红必须为有限数值")
+        prepared["dividend_per_unit"] = values
         dividend_map = prepared.groupby("ex_date")["dividend_per_unit"].sum().to_dict()
     split_map = {}
     if splits is not None and not splits.empty:
         prepared = splits.assign(split_date=pd.to_datetime(splits["split_date"]))
+        values = pd.to_numeric(prepared["split_ratio"], errors="raise")
+        if values.isna().any() or not values.map(isfinite).all() or (values <= 0).any():
+            raise ValueError("拆分比例必须为正数且为有限数值")
+        prepared["split_ratio"] = values
         split_map = prepared.groupby("split_date")["split_ratio"].prod().to_dict()
     result["dividend_per_unit"] = result["nav_date"].map(dividend_map).fillna(0.0)
     result["split_ratio"] = result["nav_date"].map(split_map).fillna(1.0)
@@ -41,8 +49,10 @@ def _return(series: pd.Series) -> float | None:
 
 def analyze(nav: pd.DataFrame, index: pd.DataFrame | None = None, manager_start_date: str | None = None) -> dict:
     ordered = nav.assign(nav_date=pd.to_datetime(nav["nav_date"])).sort_values("nav_date").reset_index(drop=True)
-    values = ordered["adjusted_nav"].astype(float)
-    daily = values.pct_change().dropna()
+    values = pd.to_numeric(ordered["adjusted_nav"], errors="raise")
+    if values.isna().any() or not values.map(isfinite).all() or (values <= 0).any():
+        raise ValueError("复权净值必须为正数且不能缺失")
+    daily = values.pct_change(fill_method=None).dropna()
     daily_std = daily.std(ddof=1)
     running_high = values.cummax(); drawdown = values / running_high - 1
     trough = int(drawdown.idxmin()); peak = int(values.loc[:trough].idxmax())
@@ -54,8 +64,9 @@ def analyze(nav: pd.DataFrame, index: pd.DataFrame | None = None, manager_start_
     result["manager_return"] = None
     if manager_start_date and pd.to_datetime(manager_start_date) <= as_of:
         earlier = ordered[ordered["nav_date"] <= pd.to_datetime(manager_start_date)]
-        starting_value = ordered.iloc[0]["adjusted_nav"] if earlier.empty else earlier.iloc[-1]["adjusted_nav"]
-        result["manager_return"] = float(values.iloc[-1] / starting_value - 1)
+        if not earlier.empty:
+            starting_value = earlier.iloc[-1]["adjusted_nav"]
+            result["manager_return"] = float(values.iloc[-1] / starting_value - 1)
     comparison = performance_series(nav, index) if index is not None and not index.empty else pd.DataFrame()
     result["comparison"] = comparison; result["excess_return"] = None if comparison.empty else float((comparison.iloc[-1]["fund"] - 1) - (comparison.iloc[-1]["csi300"] - 1))
     return result
