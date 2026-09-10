@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from fund_data import init_db, load_frame, save_bundle
+from fund_data import fetch_catalog, fetch_fund, init_db, load_frame, refresh_fund, save_bundle
 from metrics import adjust_nav, analyze
 
 
@@ -28,6 +28,64 @@ class CacheTests(unittest.TestCase):
                 save_bundle(database, "050009", {"nav": (pd.DataFrame(), "2026-09-10", "fixture")})
             actual = load_frame(database, "050009", "nav")
             self.assertEqual(actual.iloc[0]["unit_nav"], 2.0)
+
+
+class RefreshTests(unittest.TestCase):
+    def test_failed_refresh_preserves_old_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "fund.sqlite3"
+            init_db(database)
+            old = pd.DataFrame({"nav_date": ["2026-09-08"], "unit_nav": [1.9]})
+            save_bundle(database, "050009", {"nav": (old, "2026-09-08", "fixture")})
+
+            def broken_fetcher(code):
+                raise RuntimeError("network down")
+
+            result = refresh_fund(database, "050009", fetcher=broken_fetcher)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(load_frame(database, "050009", "nav").iloc[0]["unit_nav"], 1.9)
+
+    def test_catalog_rejects_renamed_columns(self):
+        class ChangedApi:
+            def fund_name_em(self):
+                return pd.DataFrame({"代码": ["050009"]})
+
+        with self.assertRaisesRegex(ValueError, "基金代码"):
+            fetch_catalog(ChangedApi())
+
+    def test_repeated_refresh_merges_nav_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "fund.sqlite3"
+            init_db(database)
+            calls = iter([1.0, 1.1])
+
+            def fetcher(code):
+                value = next(calls)
+                nav = pd.DataFrame({"nav_date": ["2026-09-09"], "unit_nav": [value]})
+                return {"nav": (nav, "2026-09-09", "fixture")}, []
+
+            refresh_fund(database, "050009", fetcher=fetcher)
+            refresh_fund(database, "050009", fetcher=fetcher)
+            actual = load_frame(database, "050009", "nav")
+            self.assertEqual(len(actual), 1)
+            self.assertEqual(actual.iloc[0]["unit_nav"], 1.1)
+
+    def test_fetch_rejects_non_finite_unit_nav(self):
+        class Api:
+            def fund_overview_em(self, symbol):
+                return pd.DataFrame({"基金简称": ["测试基金"], "基金代码": [symbol]})
+
+            def fund_open_fund_info_em(self, symbol, indicator):
+                if indicator == "单位净值走势":
+                    return pd.DataFrame({"净值日期": ["2026-09-09"], "单位净值": [float("inf")]})
+                if indicator == "累计净值走势":
+                    return pd.DataFrame({"净值日期": ["2026-09-09"], "累计净值": [1.0]})
+                if indicator == "分红送配详情":
+                    return pd.DataFrame(columns=["除息日", "每份分红"])
+                return pd.DataFrame(columns=["拆分折算日", "拆分折算比例"])
+
+        with self.assertRaisesRegex(ValueError, "单位净值"):
+            fetch_fund("050009", Api())
 
 
 class MetricTests(unittest.TestCase):

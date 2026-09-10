@@ -1,0 +1,14 @@
+{
+  "050009": {
+    "fund_name": "博时新兴成长混合",
+    "fund_type": "偏股混合型",
+    "inception_date": "2007-07-06",
+    "risk_level": "中高风险",
+    "manager_start_dates": {"曾鹏": "2013-01-18"},
+    "official_benchmark": "沪深300指数收益率×80%＋中国债券总指数收益率×20%",
+    "investment_objective": "基于中国经济正处于长期稳定增长周期，本基金通过深入研究并积极投资于全市场各类行业中的新兴高速成长企业，力争为基金份额持有人获得超越业绩比较基准的投资回报。",
+    "investment_scope": "股票（含存托凭证）60%-95%；债券0%-35%；现金及到期日在一年以内的政府债券合计不低于基金资产净值的5%",
+    "source_url": "https://www.bosera.com/common/downloadFile.do?fileId=11F8C3AC19E096C5A00DA3C39887ADE1",
+    "source_date": "2023-08-25"
+  }
+}
