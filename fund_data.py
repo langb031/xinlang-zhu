@@ -82,13 +82,20 @@ def latest_update(path: Path, key: str, successful_only: bool = False) -> dict |
     return None if row is None else dict(row)
 
 
-def need(frame: pd.DataFrame, columns: set[str], name: str, allow_empty: bool = False) -> pd.DataFrame:
+def need(frame: pd.DataFrame, columns: set[str], name: str, allow_empty: bool = False, text_columns: set[str] | None = None, date_columns: set[str] | None = None) -> pd.DataFrame:
     missing = columns - set(frame.columns)
     if missing:
         raise ValueError(f"{name} 缺少字段: {', '.join(sorted(missing))}")
     if frame.empty and not allow_empty:
         raise ValueError(f"{name} 返回空数据")
-    return frame.copy()
+    result = frame.copy()
+    for column in text_columns or set():
+        if result[column].isna().any() or result[column].astype(str).str.strip().eq("").any():
+            raise ValueError(f"{name} {column} 不能为空")
+    for column in date_columns or set():
+        if pd.to_datetime(result[column], errors="coerce").isna().any():
+            raise ValueError(f"{name} {column} 必须是有效日期")
+    return result
 
 
 def percent(value) -> float | None:
@@ -208,13 +215,13 @@ def fetch_fund(code: str, api=akshare) -> tuple[Bundle, list[str]]:
             warnings.append(f"{name}: {error}")
 
     def market():
-        frame = finite_numbers(need(api.stock_zh_index_daily_em(symbol="sh000300", start_date="19900101", end_date="20500101"), {"date", "close"}, "沪深300"), {"close"}, "沪深300", positive=True)
+        frame = finite_numbers(need(api.stock_zh_index_daily_em(symbol="sh000300", start_date="19900101", end_date="20500101"), {"date", "close"}, "沪深300", date_columns={"date"}), {"close"}, "沪深300", positive=True)
         frame = frame.rename(columns={"date": "trade_date"})[["trade_date", "close"]]
         frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime("%Y-%m-%d")
         return frame, frame["trade_date"].max(), "AKShare/东方财富"
 
     def holdings():
-        frame = finite_numbers(need(api.fund_portfolio_hold_em(symbol=code, date=""), {"序号", "股票代码", "股票名称", "占净值比例", "持仓市值", "季度"}, "基金持仓"), {"占净值比例", "持仓市值"}, "基金持仓")
+        frame = finite_numbers(need(api.fund_portfolio_hold_em(symbol=code, date=""), {"序号", "股票代码", "股票名称", "占净值比例", "持仓市值", "季度"}, "基金持仓", text_columns={"股票代码", "股票名称"}), {"占净值比例", "持仓市值"}, "基金持仓")
         result = pd.DataFrame({"rank": frame["序号"], "security_code": frame["股票代码"].astype(str).str.zfill(6), "security_name": frame["股票名称"], "weight": pd.to_numeric(frame["占净值比例"]) / 100, "market_value_cny": pd.to_numeric(frame["持仓市值"]) * 10_000, "report_date": frame["季度"].map(quarter_end)})
         latest = result["report_date"].max()
         return result[result["report_date"] == latest], latest, "AKShare/东方财富"
@@ -224,13 +231,13 @@ def fetch_fund(code: str, api=akshare) -> tuple[Bundle, list[str]]:
     report_date = bundle.get("holdings", (pd.DataFrame(), "", ""))[1]
     if report_date:
         def industry():
-            frame = finite_numbers(need(api.fund_portfolio_industry_allocation_em(symbol=code, date=report_date[:4]), {"行业类别", "占净值比例", "截止时间"}, "行业配置"), {"占净值比例"}, "行业配置")
+            frame = finite_numbers(need(api.fund_portfolio_industry_allocation_em(symbol=code, date=report_date[:4]), {"行业类别", "占净值比例", "截止时间"}, "行业配置", text_columns={"行业类别"}, date_columns={"截止时间"}), {"占净值比例"}, "行业配置")
             result = pd.DataFrame({"category": frame["行业类别"], "weight": pd.to_numeric(frame["占净值比例"]) / 100, "report_date": pd.to_datetime(frame["截止时间"]).dt.strftime("%Y-%m-%d")})
             latest = result["report_date"].max()
             return result[result["report_date"] == latest], latest, "AKShare/东方财富"
 
         def assets():
-            frame = finite_numbers(need(api.fund_individual_detail_hold_xq(symbol=code, date=report_date.replace("-", "")), {"资产类型", "仓位占比"}, "资产配置"), {"仓位占比"}, "资产配置")
+            frame = finite_numbers(need(api.fund_individual_detail_hold_xq(symbol=code, date=report_date.replace("-", "")), {"资产类型", "仓位占比"}, "资产配置", text_columns={"资产类型"}), {"仓位占比"}, "资产配置")
             result = pd.DataFrame({"category": frame["资产类型"], "weight": pd.to_numeric(frame["仓位占比"]) / 100})
             result["report_date"] = report_date
             return result, report_date, "AKShare/雪球基金"
@@ -239,7 +246,7 @@ def fetch_fund(code: str, api=akshare) -> tuple[Bundle, list[str]]:
         add("assets", assets)
 
     def fees():
-        frame = need(api.fund_individual_detail_info_xq(symbol=code), {"费用类型", "条件或名称", "费用"}, "基金费率")
+        frame = need(api.fund_individual_detail_info_xq(symbol=code), {"费用类型", "条件或名称", "费用"}, "基金费率", text_columns={"费用类型", "条件或名称"})
         frame["费用"].map(fee_number)
         result = frame.rename(columns={"费用类型": "fee_type", "条件或名称": "condition", "费用": "fee"})[["fee_type", "condition", "fee"]]
         return result, bundle["metadata"][1], "AKShare/雪球基金"

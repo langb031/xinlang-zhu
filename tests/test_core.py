@@ -9,9 +9,10 @@ from metrics import adjust_nav, analyze
 
 
 class CoreApi:
-    def __init__(self, cumulative_nav=1.0, index_close=None, fee="0.15%"):
+    def __init__(self, cumulative_nav=1.0, index_close=None, index_date="2026-09-09", fee="0.15%"):
         self.cumulative_nav = cumulative_nav
         self.index_close = index_close
+        self.index_date = index_date
         self.fee = fee
 
     def fund_overview_em(self, symbol):
@@ -27,10 +28,33 @@ class CoreApi:
         return pd.DataFrame(columns=["拆分折算日", "拆分折算比例"])
 
     def stock_zh_index_daily_em(self, symbol, start_date, end_date):
-        return pd.DataFrame({"date": ["2026-09-09"], "close": [self.index_close]})
+        return pd.DataFrame({"date": [self.index_date], "close": [self.index_close]})
 
     def fund_individual_detail_info_xq(self, symbol):
         return pd.DataFrame({"费用类型": ["管理费"], "条件或名称": ["每年"], "费用": [self.fee]})
+
+
+class OptionalApi(CoreApi):
+    def __init__(self, holding_code="000001", holding_name="平安银行", industry_category="金融", asset_category="股票", fee_type="管理费", fee_condition="每年", **kwargs):
+        super().__init__(**kwargs)
+        self.holding_code = holding_code
+        self.holding_name = holding_name
+        self.industry_category = industry_category
+        self.asset_category = asset_category
+        self.fee_type = fee_type
+        self.fee_condition = fee_condition
+
+    def fund_portfolio_hold_em(self, symbol, date):
+        return pd.DataFrame({"序号": [1], "股票代码": [self.holding_code], "股票名称": [self.holding_name], "占净值比例": [10], "持仓市值": [100], "季度": ["2026年2季度"]})
+
+    def fund_portfolio_industry_allocation_em(self, symbol, date):
+        return pd.DataFrame({"行业类别": [self.industry_category], "占净值比例": [10], "截止时间": ["2026-06-30"]})
+
+    def fund_individual_detail_hold_xq(self, symbol, date):
+        return pd.DataFrame({"资产类型": [self.asset_category], "仓位占比": [80]})
+
+    def fund_individual_detail_info_xq(self, symbol):
+        return pd.DataFrame({"费用类型": [self.fee_type], "条件或名称": [self.fee_condition], "费用": [self.fee]})
 
 
 class CacheTests(unittest.TestCase):
@@ -163,6 +187,32 @@ class RefreshTests(unittest.TestCase):
 
         self.assertNotIn("fees", bundle)
         self.assertTrue(any(warning.startswith("fees:") for warning in warnings))
+
+    def test_malformed_index_date_is_warning_and_preserves_old_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "fund.sqlite3"
+            init_db(database)
+            old = pd.DataFrame({"trade_date": ["2026-09-08"], "close": [3500.0]})
+            save_bundle(database, "050009", {"index": (old, "2026-09-08", "fixture")})
+
+            result = refresh_fund(database, "050009", fetcher=lambda code: fetch_fund(code, CoreApi(index_close=3510.0, index_date=None)))
+
+            self.assertEqual(result["status"], "partial")
+            self.assertFalse(load_frame(database, "050009", "nav").empty)
+            self.assertEqual(load_frame(database, "050009", "index").to_dict("records"), old.to_dict("records"))
+
+    def test_malformed_optional_identifiers_are_warnings(self):
+        for api, dataset in (
+            (OptionalApi(holding_code=" "), "holdings"),
+            (OptionalApi(industry_category=None), "industry"),
+            (OptionalApi(asset_category=""), "assets"),
+            (OptionalApi(fee_type=None), "fees"),
+            (OptionalApi(fee_condition=" "), "fees"),
+        ):
+            with self.subTest(dataset=dataset):
+                bundle, warnings = fetch_fund("050009", api)
+                self.assertNotIn(dataset, bundle)
+                self.assertTrue(any(warning.startswith(f"{dataset}:") for warning in warnings))
 
 
 class MetricTests(unittest.TestCase):
