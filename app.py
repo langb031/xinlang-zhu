@@ -62,7 +62,7 @@ if nav.empty:
     st.stop()
 
 metadata_frame = load_frame(DB, code, "metadata")
-metadata = metadata_frame.iloc[0].to_dict()
+metadata = {} if metadata_frame.empty else metadata_frame.iloc[0].to_dict()
 index = load_frame(DB, code, "index")
 holdings = load_frame(DB, code, "holdings")
 industry = load_frame(DB, code, "industry")
@@ -76,7 +76,7 @@ st.caption(f"净值日期：{nav['nav_date'].max()} · 最后成功更新：{(la
 cards = st.columns(4)
 cards[0].metric("单位净值", f"{nav.iloc[-1]['unit_nav']:.4f}")
 cards[1].metric("近一年收益", pct(result["period_returns"].get("1年")))
-cards[2].metric("最大回撤", pct(result["max_drawdown"]))
+cards[2].metric("最大回撤", "样本不足" if len(nav) < 2 else pct(result["max_drawdown"]))
 cards[3].metric("最近基金规模", money(metadata.get("asset_size_cny")))
 st.caption(f"基金规模报告日：{metadata.get('asset_size_date') or '暂无数据'}")
 
@@ -89,7 +89,10 @@ with overview:
         st.line_chart(comparison.set_index("date")[["fund", "csi300"]].rename(columns={"fund": "基金复权净值", "csi300": "沪深300（市场参照）"}))
         st.caption(f"共同可用数据截至：{comparison['date'].max()}")
     annual = result["calendar_returns"].dropna(subset=["return"])
-    st.bar_chart(annual.set_index("year")["return"])
+    if annual.empty:
+        st.info("年度收益样本不足")
+    else:
+        st.bar_chart(annual.set_index("year")["return"])
     st.caption(f"年度收益使用净值数据截至：{nav['nav_date'].max()}；当前年度为年初至今")
     st.line_chart(nav.set_index("nav_date")[["unit_nav", "cumulative_nav", "adjusted_nav"]].rename(columns={"unit_nav": "单位净值", "cumulative_nav": "累计净值", "adjusted_nav": "复权净值"}))
     st.caption(f"净值来源：AKShare/东方财富；截至：{nav['nav_date'].max()}")
