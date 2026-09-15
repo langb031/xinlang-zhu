@@ -83,6 +83,8 @@ def latest_update(path: Path, key: str, successful_only: bool = False) -> dict |
 
 
 def need(frame: pd.DataFrame, columns: set[str], name: str, allow_empty: bool = False, text_columns: set[str] | None = None, date_columns: set[str] | None = None) -> pd.DataFrame:
+    if frame.empty and allow_empty:
+        return frame.copy()
     missing = columns - set(frame.columns)
     if missing:
         raise ValueError(f"{name} 缺少字段: {', '.join(sorted(missing))}")
@@ -118,10 +120,10 @@ def quarter_end(value) -> str:
 
 
 def cash_dividend(value) -> float:
-    match = re.search(r"每份派现金([0-9.]+)元", str(value))
+    match = re.search(r"每(10)?份派现金([0-9.]+)元", str(value))
     if match is None:
         raise ValueError(f"无法解析每份分红: {value}")
-    return float(match.group(1))
+    return float(match.group(2)) / (10 if match.group(1) else 1)
 
 
 def split_ratio(value) -> float:
@@ -182,11 +184,13 @@ def _core(code: str, api) -> Bundle:
     }
     unit = need(api.fund_open_fund_info_em(symbol=code, indicator="单位净值走势"), {"净值日期", "单位净值"}, "单位净值")
     cumulative = finite_numbers(need(api.fund_open_fund_info_em(symbol=code, indicator="累计净值走势"), {"净值日期", "累计净值"}, "累计净值"), {"累计净值"}, "累计净值", positive=True)
-    raw_dividends = need(api.fund_open_fund_info_em(symbol=code, indicator="分红送配详情"), {"除息日", "每份分红"}, "分红", allow_empty=True)
+    raw_dividends = api.fund_open_fund_info_em(symbol=code, indicator="分红送配详情")
+    dividend_column = "每10份分红" if "每10份分红" in raw_dividends.columns else "每份分红"
+    raw_dividends = need(raw_dividends, {"除息日", dividend_column}, "分红", allow_empty=True)
     raw_splits = need(api.fund_open_fund_info_em(symbol=code, indicator="拆分详情"), {"拆分折算日", "拆分折算比例"}, "拆分", allow_empty=True)
     dividends = pd.DataFrame(columns=["ex_date", "dividend_per_unit"])
     if not raw_dividends.empty:
-        dividends = pd.DataFrame({"ex_date": raw_dividends["除息日"], "dividend_per_unit": raw_dividends["每份分红"].map(cash_dividend)})
+        dividends = pd.DataFrame({"ex_date": raw_dividends["除息日"], "dividend_per_unit": raw_dividends[dividend_column].map(cash_dividend)})
     splits = pd.DataFrame(columns=["split_date", "split_ratio"])
     if not raw_splits.empty:
         splits = pd.DataFrame({"split_date": raw_splits["拆分折算日"], "split_ratio": raw_splits["拆分折算比例"].map(split_ratio)})

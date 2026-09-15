@@ -78,7 +78,8 @@ cards[0].metric("单位净值", f"{nav.iloc[-1]['unit_nav']:.4f}")
 cards[1].metric("近一年收益", pct(result["period_returns"].get("1年")))
 cards[2].metric("最大回撤", "样本不足" if len(nav) < 2 else pct(result["max_drawdown"]))
 cards[3].metric("最近基金规模", money(metadata.get("asset_size_cny")))
-st.caption(f"基金规模报告日：{metadata.get('asset_size_date') or '暂无数据'}")
+size_date = metadata.get("asset_size_date")
+st.caption(f"基金规模报告日：{size_date if size_date and not pd.isna(size_date) else '暂无数据'}")
 
 overview, risk, portfolio, manager, documents = st.tabs(["总览", "业绩与风险", "持仓分析", "基金经理", "资料与费率"])
 with overview:
@@ -135,7 +136,10 @@ with portfolio:
             st.bar_chart(frame.set_index("category")["weight"])
             st.caption(f"来源：{source}；报告期：{frame['report_date'].max()}")
     st.subheader("前十大持仓")
-    st.dataframe(holdings.head(10), hide_index=True) if not holdings.empty else st.write("暂无数据")
+    if holdings.empty:
+        st.write("暂无数据")
+    else:
+        st.dataframe(holdings.head(10), hide_index=True)
 with manager:
     st.write(metadata.get("manager") or "暂无数据")
     st.caption(f"任职起始日：{metadata.get('manager_start_date') or '暂无数据'}；来源：AKShare/东方财富及博时基金官方资料")
@@ -146,7 +150,10 @@ with documents:
     st.write(f"投资范围：{metadata.get('investment_scope') or '暂无数据'}")
     st.write(f"管理费：{fee_pct(metadata.get('management_fee'))}；托管费：{fee_pct(metadata.get('custodian_fee'))}")
     st.caption(f"官方资料日期：{metadata.get('source_date') or '暂无数据'}；交易费率来源：AKShare/雪球基金，来自最近手动更新")
-    st.dataframe(fees, hide_index=True) if not fees.empty else st.write("暂无数据")
+    if fees.empty:
+        st.write("暂无数据")
+    else:
+        st.dataframe(fees, hide_index=True)
     if metadata.get("source_url"):
         st.link_button("查看官方产品资料", metadata["source_url"])
 

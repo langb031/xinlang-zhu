@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,6 +81,32 @@ class CacheTests(unittest.TestCase):
 
 
 class RefreshTests(unittest.TestCase):
+    def test_fetch_accepts_current_per_ten_dividend_schema(self):
+        class CurrentDividendApi(CoreApi):
+            def fund_open_fund_info_em(self, symbol, indicator):
+                if indicator == "单位净值走势":
+                    return pd.DataFrame({"净值日期": ["2026-09-08", "2026-09-09"], "单位净值": [1.0, 0.9]})
+                if indicator == "累计净值走势":
+                    return pd.DataFrame({"净值日期": ["2026-09-08", "2026-09-09"], "累计净值": [1.0, 1.0]})
+                if indicator == "分红送配详情":
+                    return pd.DataFrame({"年份": ["2026年"], "权益登记日": ["2026-09-09"], "除息日": ["2026-09-09"], "每10份分红": ["每10份派现金1.0000元"], "分红发放日": ["2026-09-11"]})
+                return super().fund_open_fund_info_em(symbol, indicator)
+
+        bundle, _ = fetch_fund("050009", CurrentDividendApi())
+
+        self.assertAlmostEqual(bundle["nav"][0].iloc[-1]["adjusted_nav"], 1.0)
+
+    def test_fetch_accepts_current_empty_split_schema(self):
+        class CurrentEmptySplitApi(CoreApi):
+            def fund_open_fund_info_em(self, symbol, indicator):
+                if indicator == "拆分详情":
+                    return pd.DataFrame()
+                return super().fund_open_fund_info_em(symbol, indicator)
+
+        bundle, _ = fetch_fund("050009", CurrentEmptySplitApi())
+
+        self.assertFalse(bundle["nav"][0].empty)
+
     def test_failed_refresh_preserves_old_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "fund.sqlite3"
@@ -213,6 +240,73 @@ class RefreshTests(unittest.TestCase):
                 bundle, warnings = fetch_fund("050009", api)
                 self.assertNotIn(dataset, bundle)
                 self.assertTrue(any(warning.startswith(f"{dataset}:") for warning in warnings))
+
+
+class AppTests(unittest.TestCase):
+    def test_non_empty_tables_do_not_render_streamlit_internals(self):
+        from streamlit.testing.v1 import AppTest
+
+        app = Path(__file__).parents[1] / "app.py"
+        original_directory = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                database = Path("data/fund_research.sqlite3")
+                init_db(database)
+                metadata = pd.DataFrame([{"fund_name": "测试基金"}])
+                nav = pd.DataFrame({
+                    "nav_date": ["2026-09-08", "2026-09-09"],
+                    "unit_nav": [1.0, 1.1],
+                    "cumulative_nav": [1.0, 1.1],
+                    "adjusted_nav": [1.0, 1.1],
+                })
+                holdings = pd.DataFrame([{
+                    "rank": 1, "security_code": "000001", "security_name": "测试股票",
+                    "weight": 0.1, "market_value_cny": 100.0, "report_date": "2026-06-30",
+                }])
+                fees = pd.DataFrame([{"fee_type": "管理费", "condition": "每年", "fee": "0.15%"}])
+                save_bundle(database, "050009", {
+                    "metadata": (metadata, "2026-09-09", "fixture"),
+                    "nav": (nav, "2026-09-09", "fixture"),
+                    "holdings": (holdings, "2026-06-30", "fixture"),
+                    "fees": (fees, "2026-09-09", "fixture"),
+                })
+
+                page = AppTest.from_file(str(app), default_timeout=20).run()
+
+                self.assertFalse(page.exception)
+                self.assertEqual(page.get("help_info"), [])
+            finally:
+                os.chdir(original_directory)
+
+    def test_missing_size_date_displays_no_data(self):
+        from streamlit.testing.v1 import AppTest
+
+        app = Path(__file__).parents[1] / "app.py"
+        original_directory = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                database = Path("data/fund_research.sqlite3")
+                init_db(database)
+                metadata = pd.DataFrame([{"fund_name": "测试基金", "asset_size_date": float("nan")}])
+                nav = pd.DataFrame({
+                    "nav_date": ["2026-09-08", "2026-09-09"],
+                    "unit_nav": [1.0, 1.1],
+                    "cumulative_nav": [1.0, 1.1],
+                    "adjusted_nav": [1.0, 1.1],
+                })
+                save_bundle(database, "050009", {
+                    "metadata": (metadata, "2026-09-09", "fixture"),
+                    "nav": (nav, "2026-09-09", "fixture"),
+                })
+
+                page = AppTest.from_file(str(app), default_timeout=20).run()
+
+                self.assertFalse(page.exception)
+                self.assertIn("基金规模报告日：暂无数据", [caption.value for caption in page.caption])
+            finally:
+                os.chdir(original_directory)
 
 
 class MetricTests(unittest.TestCase):
