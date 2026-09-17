@@ -21,6 +21,8 @@ def adjust_nav(nav: pd.DataFrame, dividends: pd.DataFrame, splits: pd.DataFrame 
     dividend_map = {}
     if not dividends.empty:
         prepared = dividends.assign(ex_date=pd.to_datetime(dividends["ex_date"]))
+        if prepared["ex_date"].isna().any():
+            raise ValueError("分红日期必须有效且不能缺失")
         values = pd.to_numeric(prepared["dividend_per_unit"], errors="raise")
         if values.isna().any() or not values.map(isfinite).all():
             raise ValueError("分红必须为有限数值")
@@ -29,6 +31,8 @@ def adjust_nav(nav: pd.DataFrame, dividends: pd.DataFrame, splits: pd.DataFrame 
     split_map = {}
     if splits is not None and not splits.empty:
         prepared = splits.assign(split_date=pd.to_datetime(splits["split_date"]))
+        if prepared["split_date"].isna().any():
+            raise ValueError("拆分日期必须有效且不能缺失")
         values = pd.to_numeric(prepared["split_ratio"], errors="raise")
         if values.isna().any() or not values.map(isfinite).all() or (values <= 0).any():
             raise ValueError("拆分比例必须为正数且为有限数值")

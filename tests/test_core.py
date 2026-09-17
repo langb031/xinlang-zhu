@@ -2,10 +2,11 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
-from fund_data import fetch_catalog, fetch_fund, init_db, load_frame, refresh_fund, save_bundle
+from fund_data import connect, fetch_catalog, fetch_fund, init_db, load_frame, record_update, refresh_fund, save_bundle
 from metrics import adjust_nav, analyze
 
 
@@ -81,6 +82,40 @@ class CacheTests(unittest.TestCase):
 
 
 class RefreshTests(unittest.TestCase):
+    def test_invalid_action_dates_abort_fetch_and_preserve_nav_cache(self):
+        for indicator, date_column, value_column, value in (
+            ("分红送配详情", "除息日", "每份分红", "每份派现金0.1元"),
+            ("拆分详情", "拆分折算日", "拆分折算比例", "1:2"),
+        ):
+            for date in (None, "", "NaT", "invalid-date"):
+                with self.subTest(indicator=indicator, date=date), tempfile.TemporaryDirectory() as directory:
+                    class InvalidActionApi(CoreApi):
+                        def fund_open_fund_info_em(self, symbol, indicator):
+                            if indicator == action:
+                                return pd.DataFrame({date_column: [date], value_column: [value]})
+                            return super().fund_open_fund_info_em(symbol, indicator)
+
+                    action = indicator
+                    database = Path(directory) / "fund.sqlite3"
+                    init_db(database)
+                    old = pd.DataFrame({"nav_date": ["2026-09-09"], "unit_nav": [1.9], "adjusted_nav": [2.1]})
+                    save_bundle(database, "050009", {"nav": (old, "2026-09-09", "fixture")})
+                    result = refresh_fund(database, "050009", fetcher=lambda code: fetch_fund(code, InvalidActionApi()))
+                    self.assertEqual(result["status"], "failed")
+                    pd.testing.assert_frame_equal(load_frame(database, "050009", "nav"), old)
+                    with self.assertRaises(ValueError):
+                        fetch_fund("050009", InvalidActionApi())
+
+    def test_partial_refresh_names_failed_dataset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "fund.sqlite3"
+            init_db(database)
+            result = refresh_fund(database, "050009", fetcher=lambda code: fetch_fund(code, OptionalApi()))
+            self.assertEqual(result["status"], "partial")
+            self.assertIn("沪深300", result["message"])
+            self.assertNotIn("持仓", result["message"])
+            self.assertNotIn("费率", result["message"])
+
     def test_fetch_accepts_current_per_ten_dividend_schema(self):
         class CurrentDividendApi(CoreApi):
             def fund_open_fund_info_em(self, symbol, indicator):
@@ -243,6 +278,66 @@ class RefreshTests(unittest.TestCase):
 
 
 class AppTests(unittest.TestCase):
+    def cached_page(self):
+        from streamlit.testing.v1 import AppTest
+
+        app = Path(__file__).parents[1] / "app.py"
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(directory.name)
+        database = Path("data/fund_research.sqlite3")
+        init_db(database)
+        nav = pd.DataFrame({"nav_date": ["2026-09-09"], "unit_nav": [1.9], "cumulative_nav": [2.0], "adjusted_nav": [2.1]})
+        fees = pd.DataFrame([{"fee_type": "申购费", "condition": "100万元以下", "fee": "1.50%"}])
+        save_bundle(database, "050009", {"nav": (nav, "2026-09-09", "fixture"), "fees": (fees, "2026-08-01", "费率测试来源")})
+        catalog = pd.DataFrame({"fund_code": ["050009", "000001"], "fund_name": ["测试(A)", "其他基金"], "fund_type": ["混合", "混合"]})
+        save_bundle(database, "__all__", {"catalog": (catalog, "2026-09-09", "fixture")})
+        return AppTest.from_file(str(app), default_timeout=20), database
+
+    def test_catalog_failure_keeps_cached_page_visible(self):
+        page, database = self.cached_page()
+        old_catalog = load_frame(database, "__all__", "catalog")
+        page.run()
+        for error in (RuntimeError("network down"), ValueError("changed columns")):
+            with self.subTest(error=error), patch("fund_data.refresh_catalog", side_effect=error):
+                page.button[1].click().run()
+                self.assertFalse(page.exception)
+                self.assertTrue(any("重试" in item.value for item in page.error))
+                self.assertEqual(page.metric[0].value, "1.9000")
+                self.assertEqual(len(page.tabs), 5)
+                pd.testing.assert_frame_equal(load_frame(database, "__all__", "catalog"), old_catalog)
+
+    def test_name_search_treats_parenthesis_as_literal(self):
+        page, _ = self.cached_page()
+        page.run().text_input[0].set_value("(").run()
+        self.assertFalse(page.exception)
+        self.assertEqual(page.selectbox[0].options, ["050009 · 测试(A)"])
+        self.assertEqual(page.metric[0].value, "1.9000")
+
+    def test_partial_banner_names_failed_dataset(self):
+        page, database = self.cached_page()
+        record_update(database, "050009", "partial", "index: network down")
+        page.run()
+        self.assertFalse(page.exception)
+        warnings = " ".join(item.value for item in page.warning)
+        self.assertIn("沪深300", warnings)
+        self.assertNotIn("持仓", warnings)
+        self.assertNotIn("费率", warnings)
+
+    def test_failed_fee_refresh_displays_original_cache_time(self):
+        page, database = self.cached_page()
+        with connect(database) as connection:
+            connection.execute("UPDATE cache SET fetched_at=? WHERE dataset='fees'", ("2026-08-01T12:00:00+08:00",))
+        record_update(database, "050009", "partial", "fees: network down")
+        page.run()
+        self.assertFalse(page.exception)
+        captions = " ".join(item.value for item in page.tabs[4].caption)
+        self.assertIn("2026-08-01T12:00:00+08:00", captions)
+        self.assertIn("费率测试来源", captions)
+        self.assertIn("费率", " ".join(item.value for item in page.warning))
+        self.assertEqual(page.tabs[4].dataframe[0].value.iloc[0]["fee"], "1.50%")
+
     def test_non_empty_tables_do_not_render_streamlit_internals(self):
         from streamlit.testing.v1 import AppTest
 
@@ -276,6 +371,9 @@ class AppTests(unittest.TestCase):
 
                 self.assertFalse(page.exception)
                 self.assertEqual(page.get("help_info"), [])
+                for tab, expected in ((page.tabs[0], holdings), (page.tabs[2], holdings), (page.tabs[4], fees)):
+                    self.assertEqual(len(tab.dataframe), 1)
+                    pd.testing.assert_frame_equal(tab.dataframe[0].value, expected)
             finally:
                 os.chdir(original_directory)
 
@@ -310,6 +408,14 @@ class AppTests(unittest.TestCase):
 
 
 class MetricTests(unittest.TestCase):
+    def test_missing_or_invalid_corporate_action_dates_are_rejected(self):
+        nav = pd.DataFrame({"nav_date": ["2026-01-01"], "unit_nav": [1.0]})
+        for date in (None, "", "NaT", "invalid-date"):
+            with self.subTest(action="dividend", date=date), self.assertRaises(ValueError):
+                adjust_nav(nav, pd.DataFrame({"ex_date": [date], "dividend_per_unit": [0.1]}))
+            with self.subTest(action="split", date=date), self.assertRaises(ValueError):
+                adjust_nav(nav, pd.DataFrame(), pd.DataFrame({"split_date": [date], "split_ratio": [2.0]}))
+
     def test_invalid_corporate_actions_are_rejected(self):
         nav = pd.DataFrame({"nav_date": ["2026-01-01"], "unit_nav": [1.0]})
         with self.assertRaises(ValueError):

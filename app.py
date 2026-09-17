@@ -4,7 +4,7 @@ import re
 import pandas as pd
 import streamlit as st
 
-from fund_data import init_db, latest_update, load_frame, refresh_catalog, refresh_fund
+from fund_data import init_db, latest_update, load_frame, partial_update_message, refresh_catalog, refresh_fund
 from metrics import analyze
 
 
@@ -17,7 +17,7 @@ query = st.text_input("基金名称或六位代码", "050009").strip()
 catalog = load_frame(DB, "__all__", "catalog")
 code = query if re.fullmatch(r"\d{6}", query) else None
 if code is None and not catalog.empty and query:
-    matches = catalog[catalog["fund_name"].str.contains(query, case=False, na=False)]
+    matches = catalog[catalog["fund_name"].str.contains(query, case=False, na=False, regex=False)]
     if not matches.empty:
         choices = {f"{row.fund_code} · {row.fund_name}": row.fund_code for row in matches.itertuples()}
         code = choices[st.selectbox("匹配结果", list(choices))]
@@ -28,9 +28,13 @@ if left.button("更新当前基金", disabled=code is None):
         result = refresh_fund(DB, code)
     (st.success if result["status"] == "success" else st.warning if result["status"] == "partial" else st.error)(result["message"])
 if right.button("刷新基金目录"):
-    with st.spinner("正在刷新基金目录……"):
-        count = refresh_catalog(DB)
-    st.success(f"基金目录已更新：{count} 只")
+    try:
+        with st.spinner("正在刷新基金目录……"):
+            count = refresh_catalog(DB)
+    except Exception:
+        st.error("基金目录刷新失败，请稍后重试；已有缓存仍可查看。")
+    else:
+        st.success(f"基金目录已更新：{count} 只")
 
 
 def pct(value) -> str:
@@ -53,7 +57,7 @@ update = latest_update(DB, code)
 if update and update["status"] == "failed":
     st.error("上次更新失败，请稍后重试；本地旧数据仍然保留。")
 elif update and update["status"] == "partial":
-    st.warning("上次仅完成核心数据更新，部分持仓或费率数据暂不可用。")
+    st.warning("上次更新：" + partial_update_message(update["message"]))
 
 nav = load_frame(DB, code, "nav")
 if nav.empty:
@@ -149,7 +153,7 @@ with documents:
     st.write(f"官方业绩比较基准：{metadata.get('official_benchmark') or '暂无数据'}")
     st.write(f"投资范围：{metadata.get('investment_scope') or '暂无数据'}")
     st.write(f"管理费：{fee_pct(metadata.get('management_fee'))}；托管费：{fee_pct(metadata.get('custodian_fee'))}")
-    st.caption(f"官方资料日期：{metadata.get('source_date') or '暂无数据'}；交易费率来源：AKShare/雪球基金，来自最近手动更新")
+    st.caption(f"官方资料日期：{metadata.get('source_date') or '暂无数据'}；交易费率来源：{fees.attrs.get('source', '暂无数据')}；费率缓存更新时间：{fees.attrs.get('fetched_at', '暂无数据')}")
     if fees.empty:
         st.write("暂无数据")
     else:

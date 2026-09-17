@@ -60,8 +60,12 @@ def load_frame(path: Path, key: str, dataset: str) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     with connect(path) as connection:
-        row = connection.execute("SELECT payload FROM cache WHERE cache_key=? AND dataset=?", (key, dataset)).fetchone()
-    return pd.DataFrame() if row is None else pd.read_json(StringIO(row["payload"]), orient="table", precise_float=True)
+        row = connection.execute("SELECT payload, source, fetched_at FROM cache WHERE cache_key=? AND dataset=?", (key, dataset)).fetchone()
+    if row is None:
+        return pd.DataFrame()
+    frame = pd.read_json(StringIO(row["payload"]), orient="table", precise_float=True)
+    frame.attrs.update(source=row["source"], fetched_at=row["fetched_at"])
+    return frame
 
 
 def record_update(path: Path, key: str, status: str, message: str) -> None:
@@ -265,6 +269,12 @@ def refresh_catalog(path: Path, api=akshare) -> int:
     return len(frame)
 
 
+def partial_update_message(message: str) -> str:
+    labels = {"index": "沪深300", "holdings": "持仓", "industry": "行业配置", "assets": "资产配置", "fees": "费率"}
+    failed = [labels[name] for name in re.findall(r"(?:^|；)(\w+):", message) if name in labels]
+    return f"核心数据已更新；{'、'.join(failed) or '部分数据'}更新失败，请稍后重试；已有缓存仍可查看。"
+
+
 def refresh_fund(path: Path, code: str, fetcher=fetch_fund) -> dict:
     if re.fullmatch(r"\d{6}", code) is None:
         raise ValueError("基金代码必须是 6 位数字")
@@ -282,7 +292,7 @@ def refresh_fund(path: Path, code: str, fetcher=fetch_fund) -> dict:
     except Exception as error:
         status, message = "failed", str(error)
     record_update(path, code, status, message)
-    user_message = {"success": "更新完成", "partial": "核心数据已更新，部分持仓或费率数据暂不可用。", "failed": "更新失败，请稍后重试；本地旧数据仍然保留。"}[status]
+    user_message = {"success": "更新完成", "partial": partial_update_message(message), "failed": "更新失败，请稍后重试；本地旧数据仍然保留。"}[status]
     return {"status": status, "message": user_message}
 
 
